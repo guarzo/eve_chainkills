@@ -1,0 +1,30 @@
+{
+  "APIBaseUrl": "https://yourapi.example.com/api",
+  "APISlug": "YOUR_SLUG_HERE",
+  "APIToken": "YOUR_BEARER_TOKEN_HERE",
+
+  "characterIdForUpdates": "SOME_CHARACTER_ID",
+
+  "discordChainkillWebhookId": "YOUR_CHAINKILL_WEBHOOK_ID",
+  "discordChainkillWebhookToken": "YOUR_CHAINKILL_WEBHOOK_TOKEN",
+
+  "discordCorpkillWebhookId": "YOUR_CORPKILL_WEBHOOK_ID",
+  "discordCorpkillWebhookToken": "YOUR_CORPKILL_WEBHOOK_TOKEN",
+
+  "discordInfoWebhookId": "YOUR_INFO_WEBHOOK_ID",
+  "discordInfoWebhookToken": "YOUR_INFO_WEBHOOK_TOKEN",
+
+  "discordKillNotifications": {
+    "killColor": "#00FF00",
+    "lossColor": "#FF0000"
+  },
+  "discordStatusReportMins": 60,
+
+  "insightTrackedIds": [
+    99999999,
+    88888888,
+    77777777
+  ],
+
+  "systemKillStatusResetMinutes": 90
+}

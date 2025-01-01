@@ -1,0 +1,11 @@
+services:
+  eve-chainkills:
+    build: .
+    container_name: eve-chainkills
+    restart: unless-stopped
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
