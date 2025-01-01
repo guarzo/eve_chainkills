@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -42,7 +43,7 @@ type SystemInfo struct {
 
 // MapCharacter is a small struct for storing character data from your new API
 type MapCharacter struct {
-	CharacterId   int
+	CharacterId   string
 	CorporationId int
 	AllianceId    int
 }
@@ -69,7 +70,7 @@ func NewChainKillChecker(logger *log.Logger, config *AppConfig) (*ChainKillCheck
 		lastDiscordStatusTime: time.Now(),
 		minToGetLatestSystems: 0, // was 0 in the JS code
 	}
-	ck.logger.Printf("[ChainKillChecker] Initialized. Map IDs: %v, insightTrackedIds: %v", mapIds, ck.insightTrackedIds)
+	ck.logger.Printf("[ChainKillChecker] Initialized. insightTrackedIds: %v", ck.insightTrackedIds)
 	return ck, nil
 }
 
@@ -115,7 +116,7 @@ func (ck *ChainKillChecker) connectAndListenZKill() {
 			"action":  "sub",
 			"channel": "killstream",
 		}
-		if err := conn.WriteJSON(subMessage); err != nil {
+		if err = conn.WriteJSON(subMessage); err != nil {
 			ck.logger.Printf("Error sending sub message to zKill: %v", err)
 			conn.Close()
 			time.Sleep(reconnectDelay)
@@ -270,7 +271,7 @@ func (ck *ChainKillChecker) handleZKillMessage(jsonData string) error {
 		foundMappedAttacker := false
 		for _, att := range messageData.Attackers {
 			for _, mc := range ck.mapCharacters {
-				if mc.CharacterId == att.CharacterId {
+				if mc.CharacterId == strconv.FormatInt(int64(att.CharacterId), 10) {
 					foundMappedAttacker = true
 					break
 				}
@@ -328,16 +329,27 @@ func (ck *ChainKillChecker) updateSystems() error {
 			SolarSystemId int    `json:"solar_system_id"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return err
 	}
 
 	var newSystems []SystemInfo
 	for _, item := range body.Data {
-		newSystems = append(newSystems, SystemInfo{
-			SystemId: item.SolarSystemId,
-			Alias:    item.Name,
-		})
+		nameLen := len(item.Name)
+		if nameLen > 0 {
+			ck.logger.Printf("processing system: %v \n", item)
+
+			lastChar := item.Name[nameLen-1]
+			if (lastChar >= 'A' && lastChar <= 'Z') || (lastChar >= 'a' && lastChar <= 'z') {
+				// Ends with a letter => skip
+				continue
+			}
+
+			newSystems = append(newSystems, SystemInfo{
+				SystemId: item.SolarSystemId,
+				Alias:    item.Name,
+			})
+		}
 	}
 	ck.systems = newSystems
 	ck.logger.Printf("[updateSystems] Fetched %d systems.\n", len(ck.systems))
@@ -374,13 +386,14 @@ func (ck *ChainKillChecker) getMapCharacters() error {
 			Id        string `json:"id"` // not used
 			Character struct {
 				Id            string `json:"id"`
-				EveId         int    `json:"eve_id"`
+				EveId         string `json:"eve_id"`
 				CorporationId int    `json:"corporation_id"`
 				AllianceId    int    `json:"alliance_id"`
 			} `json:"character"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	ck.logger.Println(fmt.Sprintf("character data %v", body))
+	if err = json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return err
 	}
 

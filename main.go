@@ -17,7 +17,6 @@ func main() {
 
 	// 2) Create logger (simple version using stdlib)
 	logger := log.Default()
-	logger.Printf("LogLevel: %s\n", cfg.LogLevel)
 
 	// 3) Initialize and start the ChainKillChecker
 	ckChecker, err := NewChainKillChecker(logger, cfg)
