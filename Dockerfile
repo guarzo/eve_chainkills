@@ -1,12 +1,12 @@
 # Build stage
-FROM golang:1.20-alpine AS builder
+FROM golang:1.23 AS builder
 
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . /app
-RUN CGO_ENABLED=0 go build -o /app/eve-chainkills main.go
+RUN CGO_ENABLED=0 go build -o /app/eve-chainkills
 
 # Run stage
 FROM alpine:3.17
