@@ -64,6 +64,15 @@ func (kd *KillDetails) GetKillDetails() error {
 	kd.FKM.SolarSystemID = km.SolarSystemID
 	kd.FKM.Victim = km.Victim
 	kd.FKM.Attackers = km.Attackers
+	
+	kd.FKM.TotalValue = zm.ZKB.TotalValue
+	kd.FKM.DestroyedValue = zm.ZKB.DestroyedValue
+	kd.FKM.DroppedValue = zm.ZKB.DroppedValue
+	kd.FKM.FittedValue = zm.ZKB.FittedValue
+	kd.FKM.Points = zm.ZKB.Points
+	kd.FKM.NPC = zm.ZKB.NPC
+	kd.FKM.Solo = zm.ZKB.Solo
+	kd.FKM.Awox = zm.ZKB.Awox
 
 	if kd.FKM.SolarSystemID > 0 {
 		sysName, sysErr := fetchSystemName(kd.FKM.SolarSystemID)
