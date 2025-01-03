@@ -62,6 +62,10 @@ The **eve-chainkills** application uses a real-time WebSocket feed from [zKillbo
 
 Once the containers start, the application will connect to zKillboard and begin listening for kills. You should see logs in the Docker container output, and relevant notifications appearing in Discord.
 
+## Original Author
+
+- [Caleb Forsythe](https://evewho.com/character/605249834)
+
 ## License  
 This project is licensed under the [MIT License](LICENSE) - see the LICENSE file for details.
 
