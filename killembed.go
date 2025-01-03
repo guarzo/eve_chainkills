@@ -213,5 +213,5 @@ func formatISKValue(amount float64) string {
 	// Round to 2 decimals (e.g. 1.2345 => 1.23)
 	millions = math.Round(millions*100) / 100
 
-	return fmt.Sprintf("%.2f M ISK", millions)
+	return fmt.Sprintf("%.1fm ISK", millions)
 }
