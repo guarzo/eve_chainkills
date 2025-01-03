@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"strings"
+	"math"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -204,44 +204,14 @@ func parseHexColor(hexStr string) int {
 // formatISKValue - formats ISK with commas in the thousands place
 // e.g. 1234567.89 => 1,234,567.89 ISK
 func formatISKValue(amount float64) string {
-	s := fmt.Sprintf("%.2f", amount) // "1234567.89"
-	parts := strings.Split(s, ".")   // ["1234567", "89"]
-
-	integerPart := parts[0]  // "1234567"
-	fractionPart := parts[1] // "89"
-
-	// Insert commas in integer part
-	integerPartWithCommas := insertCommas(integerPart)
-
-	return fmt.Sprintf("%s.%s ISK", integerPartWithCommas, fractionPart)
-}
-
-// insertCommas takes something like "1234567" => "1,234,567"
-func insertCommas(numStr string) string {
-	if len(numStr) <= 3 {
-		return numStr
+	if amount < 1_000_000 {
+		return "<1 M ISK"
 	}
+	// Convert to millions
+	millions := amount / 1_000_000
 
-	// Handle negative numbers if needed
-	negative := false
-	if strings.HasPrefix(numStr, "-") {
-		negative = true
-		numStr = numStr[1:] // strip leading '-'
-	}
+	// Round to 2 decimals (e.g. 1.2345 => 1.23)
+	millions = math.Round(millions*100) / 100
 
-	// Then proceed
-	n := len(numStr)
-	remainder := n % 3
-	if remainder == 0 {
-		remainder = 3
-	}
-	out := numStr[:remainder]
-	for i := remainder; i < n; i += 3 {
-		out += "," + numStr[i:i+3]
-	}
-
-	if negative {
-		out = "-" + out
-	}
-	return out
+	return fmt.Sprintf("%.2f M ISK", millions)
 }

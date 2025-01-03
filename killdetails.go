@@ -64,7 +64,7 @@ func (kd *KillDetails) GetKillDetails() error {
 	kd.FKM.SolarSystemID = km.SolarSystemID
 	kd.FKM.Victim = km.Victim
 	kd.FKM.Attackers = km.Attackers
-	
+
 	kd.FKM.TotalValue = zm.ZKB.TotalValue
 	kd.FKM.DestroyedValue = zm.ZKB.DestroyedValue
 	kd.FKM.DroppedValue = zm.ZKB.DroppedValue
@@ -167,7 +167,7 @@ func (kd *KillDetails) fetchVictimName(charID int) error {
 	}
 
 	var cr EsiCharacterResponse
-	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&cr); err != nil {
 		return fmt.Errorf("JSON decode error from ESI character: %w", err)
 	}
 
@@ -186,7 +186,7 @@ func fetchCharacterName(charID int) (string, error) {
 		return "", fmt.Errorf("bad status %d", resp.StatusCode)
 	}
 	var c EsiCharacterResponse
-	if err := json.NewDecoder(resp.Body).Decode(&c); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&c); err != nil {
 		return "", err
 	}
 	return c.Name, nil
@@ -208,9 +208,8 @@ func fetchCorporationName(corpID int) (string, error) {
 	var corp struct {
 		Name   string `json:"name"`
 		Ticker string `json:"ticker"`
-		// ESI includes other fields like member_count, date_founded, etc. Add as needed.
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&corp); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&corp); err != nil {
 		return "", fmt.Errorf("JSON decode error (corp): %w", err)
 	}
 
@@ -233,9 +232,8 @@ func fetchAllianceName(allianceID int) (string, error) {
 	var alli struct {
 		Name   string `json:"name"`
 		Ticker string `json:"ticker"`
-		// ESI includes other fields like date_founded, creator_corporation_id, etc. Add as needed.
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&alli); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&alli); err != nil {
 		return "", fmt.Errorf("JSON decode error (alliance): %w", err)
 	}
 
@@ -254,9 +252,8 @@ func fetchTypeName(typeID int) (string, error) {
 	}
 	var body struct {
 		Name string `json:"name"`
-		// ESI has many other fields if needed
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return "", err
 	}
 	return body.Name, nil
@@ -276,9 +273,8 @@ func fetchSystemName(systemID int) (string, error) {
 
 	var sys struct {
 		Name string `json:"name"`
-		// ESI includes other fields like constellation_id, security_status, etc.
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&sys); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&sys); err != nil {
 		return "", err
 	}
 	return sys.Name, nil
