@@ -3,138 +3,147 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
-// KillDetails in JS handled fetching details from ESI or zKill’s endpoints.
-// In Go, we’ll do the same: use the killmail_id/hash from zKill, call ESI,
-// then (optionally) fetch the victim's character name from ESI.
+// KillDetails merges zKill + ESI data into FlattenedKillMail, plus IsKill
 type KillDetails struct {
-	logger  *log.Logger
+	logger  *logrus.Logger
 	config  *AppConfig
-	msgData interface{}
+	rawData []byte // raw zKill message
 
-	// Data we fill in after ESI calls:
-	KillmailID          int
-	KillmailHash        string
-	SolarSystemID       int
-	KillmailTime        time.Time
-	VictimCharacterID   int
-	VictimCorporationID int
-	VictimAllianceID    int
-	VictimCharacterName string
-	IsKill              bool // set later by your chainkillchecker
+	// The combined/merged data from zKill + ESI
+	FKM    FlattenedKillMail
+	IsKill bool
 }
 
-// This is what ESI returns from the killmail endpoint
-type esiKillmailResponse struct {
-	Attackers []struct {
-		CharacterID   int `json:"character_id"`
-		CorporationID int `json:"corporation_id"`
-		AllianceID    int `json:"alliance_id"`
-	} `json:"attackers"`
-	Victim struct {
-		CharacterID   int `json:"character_id"`
-		CorporationID int `json:"corporation_id"`
-		AllianceID    int `json:"alliance_id"`
-	} `json:"victim"`
-	KillmailTime  string `json:"killmail_time"`   // e.g. "2023-01-02T15:04:05Z"
-	SolarSystemID int    `json:"solar_system_id"` // e.g. 31000265 for a wormhole
-	KillmailID    int    `json:"killmail_id"`     // might be redundant but returned
-	ZkbHash       string // not actually in ESI, but we store it if needed
-}
-
-// ESI character response for name lookups, etc.
-type esiCharacterResponse struct {
-	Name string `json:"name"`
-	// ESI includes other fields (corp, alliance, birthday, security_status, etc.)
-	// but we only need name here.
-}
-
-func NewKillDetails(logger *log.Logger, config *AppConfig, msgData interface{}) *KillDetails {
+func NewKillDetails(logger *logrus.Logger, config *AppConfig, raw []byte) *KillDetails {
 	return &KillDetails{
 		logger:  logger,
 		config:  config,
-		msgData: msgData,
+		rawData: raw,
 	}
 }
 
-// GetKillDetails extracts killmail_id & hash from msgData, calls ESI, and sets victim info
+// GetKillDetails merges the data from zKill + ESI into kd.FKM
 func (kd *KillDetails) GetKillDetails() error {
-	// 1) Parse killmail_id and hash from kd.msgData
-	//    zKill typically includes something like: { killmail_id, zkb: { hash } }
-	zkillJSON, err := json.Marshal(kd.msgData)
-	if err != nil {
-		return fmt.Errorf("failed to marshal kd.msgData: %w", err)
+	var zm ZkillMail
+	if err := json.Unmarshal(kd.rawData, &zm); err != nil {
+		return fmt.Errorf("unmarshal zkill message: %w", err)
 	}
-	var zkill struct {
-		KillmailID int `json:"killmail_id"`
-		Zkb        struct {
-			Hash string `json:"hash"`
-		} `json:"zkb"`
-	}
-	if err := json.Unmarshal(zkillJSON, &zkill); err != nil {
-		return fmt.Errorf("failed to unmarshal zkill message: %w", err)
-	}
-	kd.KillmailID = zkill.KillmailID
-	kd.KillmailHash = zkill.Zkb.Hash
 
-	// If either is missing, just log & exit
-	if kd.KillmailID == 0 || kd.KillmailHash == "" {
+	kd.FKM.KillMailID = zm.KillmailID
+	kd.FKM.SolarSystemID = zm.SolarSystemID
+
+	if kd.FKM.KillMailID == 0 || zm.ZKB.Hash == "" {
 		kd.logger.Printf("No killmail_id or hash found in zkill message.")
 		return nil
 	}
+	kd.FKM.Hash = zm.ZKB.Hash
 
-	// 2) Build ESI killmail URL
-	//    e.g. https://esi.evetech.net/latest/killmails/{killmail_id}/{hash}/
 	killmailURL := fmt.Sprintf("https://esi.evetech.net/latest/killmails/%d/%s/?datasource=tranquility",
-		kd.KillmailID, kd.KillmailHash)
-	kd.logger.Printf("Fetching ESI killmail data from %s", killmailURL)
-
-	// 3) Fetch from ESI
-	killmailResp, err := doGetRequest(killmailURL)
+		kd.FKM.KillMailID, kd.FKM.Hash)
+	resp, err := doGetRequest(killmailURL)
 	if err != nil {
-		kd.logger.Printf("ESI killmail fetch error: %v", err)
 		return err
 	}
-	defer killmailResp.Body.Close()
-	if killmailResp.StatusCode < 200 || killmailResp.StatusCode > 299 {
-		return fmt.Errorf("ESI killmail returned status %d", killmailResp.StatusCode)
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("ESI killmail returned status %d", resp.StatusCode)
 	}
 
-	// 4) Parse JSON
-	var km esiKillmailResponse
-	if err := json.NewDecoder(killmailResp.Body).Decode(&km); err != nil {
-		return fmt.Errorf("JSON decode error from ESI killmail: %w", err)
+	var km EsiKillMail
+	if err = json.NewDecoder(resp.Body).Decode(&km); err != nil {
+		return fmt.Errorf("JSON decode error: %w", err)
 	}
 
-	// 5) Fill in your KillDetails
-	kd.SolarSystemID = km.SolarSystemID
-	kd.VictimCharacterID = km.Victim.CharacterID
-	kd.VictimCorporationID = km.Victim.CorporationID
-	kd.VictimAllianceID = km.Victim.AllianceID
-	if km.KillmailTime != "" {
-		// parse time
-		t, err := time.Parse(time.RFC3339, km.KillmailTime)
-		if err == nil {
-			kd.KillmailTime = t
+	kd.FKM.KillMailTime = km.KillMailTime
+	kd.FKM.SolarSystemID = km.SolarSystemID
+	kd.FKM.Victim = km.Victim
+	kd.FKM.Attackers = km.Attackers
+
+	if kd.FKM.SolarSystemID > 0 {
+		sysName, sysErr := fetchSystemName(kd.FKM.SolarSystemID)
+		if sysErr != nil {
+			kd.logger.Printf("Error fetching system name: %v", sysErr)
+		} else {
+			kd.FKM.SystemName = sysName
 		}
 	}
 
-	// 6) Optionally fetch the victim’s character name (if victimCharacterID > 0)
-	if kd.VictimCharacterID > 0 {
-		if err := kd.fetchVictimName(kd.VictimCharacterID); err != nil {
-			kd.logger.Printf("Error fetching victim name: %v", err)
+	if kd.FKM.Victim.ShipTypeID > 0 {
+		vsn, vsnErr := fetchTypeName(kd.FKM.Victim.ShipTypeID)
+		if vsnErr != nil {
+			kd.logger.Printf("Error fetching victim ship name: %v", vsnErr)
+		} else {
+			kd.FKM.VictimShipName = vsn
 		}
 	}
 
-	kd.logger.Printf("Fetched kill details, victim name = %s", kd.VictimCharacterName)
+	finalIdx := -1
+	for i, att := range km.Attackers {
+		if att.FinalBlow {
+			finalIdx = i
+			break
+		}
+	}
+	if finalIdx < 0 && len(km.Attackers) > 0 {
+		finalIdx = 0 // fallback
+	}
+	if finalIdx >= 0 {
+		final := km.Attackers[finalIdx]
+		kd.FKM.FinalAttackerID = final.CharacterID
+		kd.FKM.FinalAttackerCorpID = final.CorporationID
+		kd.FKM.FinalAttackerAllianceID = final.AllianceID
+
+		if final.CharacterID > 0 {
+			attName, _ := fetchCharacterName(final.CharacterID)
+			kd.FKM.FinalAttackerName = attName
+		}
+
+		if kd.FKM.FinalAttackerCorpID > 0 {
+			corpName, _ := fetchCorporationName(final.CorporationID)
+			kd.FKM.FinalAttackerCorpName = corpName
+		}
+
+		if kd.FKM.FinalAttackerAllianceID > 0 {
+			alliName, _ := fetchAllianceName(final.AllianceID)
+			kd.FKM.FinalAttackerAllianceName = alliName
+		}
+
+		if final.ShipTypeID > 0 {
+			attShipName, _ := fetchTypeName(final.ShipTypeID)
+			kd.FKM.FinalAttackerShipName = attShipName
+		}
+	}
+
+	if kd.FKM.Victim.CharacterID > 0 {
+		name, errName := fetchCharacterName(kd.FKM.Victim.CharacterID)
+		if errName != nil {
+			kd.logger.Printf("Error fetching victim name: %v", errName)
+		} else {
+			kd.FKM.VictimCharacterName = name
+		}
+	}
+
+	if kd.FKM.Victim.CorporationID > 0 {
+		corpName, _ := fetchCorporationName(kd.FKM.Victim.CorporationID)
+		kd.FKM.VictimCorpName = corpName
+	}
+
+	if kd.FKM.Victim.AllianceID > 0 {
+		alliName, _ := fetchAllianceName(kd.FKM.Victim.AllianceID)
+		kd.FKM.VictimAllianceName = alliName
+	}
+
+	kd.logger.Printf("Fetched kill details, system=%s, victimShip=%s", kd.FKM.SystemName, kd.FKM.VictimShipName)
 	return nil
 }
 
-// fetchVictimName calls ESI’s character endpoint to get the Name
+// fetchVictimName calls ESI's character endpoint to get name
 func (kd *KillDetails) fetchVictimName(charID int) error {
 	charURL := fmt.Sprintf("https://esi.evetech.net/latest/characters/%d/?datasource=tranquility", charID)
 	kd.logger.Printf("Fetching ESI character data from %s", charURL)
@@ -148,24 +157,129 @@ func (kd *KillDetails) fetchVictimName(charID int) error {
 		return fmt.Errorf("ESI character returned status %d", resp.StatusCode)
 	}
 
-	var c esiCharacterResponse
-	if err := json.NewDecoder(resp.Body).Decode(&c); err != nil {
+	var cr EsiCharacterResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
 		return fmt.Errorf("JSON decode error from ESI character: %w", err)
 	}
 
-	kd.VictimCharacterName = c.Name
+	kd.FKM.VictimCharacterName = cr.Name
 	return nil
 }
 
-// doGetRequest is a small helper for GET calls with a default timeout.
+func fetchCharacterName(charID int) (string, error) {
+	url := fmt.Sprintf("https://esi.evetech.net/latest/characters/%d/?datasource=tranquility", charID)
+	resp, err := doGetRequest(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", fmt.Errorf("bad status %d", resp.StatusCode)
+	}
+	var c EsiCharacterResponse
+	if err := json.NewDecoder(resp.Body).Decode(&c); err != nil {
+		return "", err
+	}
+	return c.Name, nil
+}
+
+// fetchCorporationName queries ESI for corporation info, returns its name.
+func fetchCorporationName(corpID int) (string, error) {
+	url := fmt.Sprintf("https://esi.evetech.net/latest/corporations/%d/?datasource=tranquility", corpID)
+	resp, err := doGetRequest(url)
+	if err != nil {
+		return "", fmt.Errorf("fetchCorporationName: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", fmt.Errorf("fetchCorporationName got status %d", resp.StatusCode)
+	}
+
+	var corp struct {
+		Name   string `json:"name"`
+		Ticker string `json:"ticker"`
+		// ESI includes other fields like member_count, date_founded, etc. Add as needed.
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&corp); err != nil {
+		return "", fmt.Errorf("JSON decode error (corp): %w", err)
+	}
+
+	return corp.Name, nil
+}
+
+// fetchAllianceName queries ESI for alliance info, returns its name.
+func fetchAllianceName(allianceID int) (string, error) {
+	url := fmt.Sprintf("https://esi.evetech.net/latest/alliances/%d/?datasource=tranquility", allianceID)
+	resp, err := doGetRequest(url)
+	if err != nil {
+		return "", fmt.Errorf("fetchAllianceName: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", fmt.Errorf("fetchAllianceName got status %d", resp.StatusCode)
+	}
+
+	var alli struct {
+		Name   string `json:"name"`
+		Ticker string `json:"ticker"`
+		// ESI includes other fields like date_founded, creator_corporation_id, etc. Add as needed.
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&alli); err != nil {
+		return "", fmt.Errorf("JSON decode error (alliance): %w", err)
+	}
+
+	return alli.Name, nil
+}
+
+func fetchTypeName(typeID int) (string, error) {
+	url := fmt.Sprintf("https://esi.evetech.net/latest/universe/types/%d/?datasource=tranquility", typeID)
+	resp, err := doGetRequest(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", fmt.Errorf("bad status %d", resp.StatusCode)
+	}
+	var body struct {
+		Name string `json:"name"`
+		// ESI has many other fields if needed
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", err
+	}
+	return body.Name, nil
+}
+
+func fetchSystemName(systemID int) (string, error) {
+	url := fmt.Sprintf("https://esi.evetech.net/latest/universe/systems/%d/?datasource=tranquility", systemID)
+	resp, err := doGetRequest(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", fmt.Errorf("fetchSystemName got status %d", resp.StatusCode)
+	}
+
+	var sys struct {
+		Name string `json:"name"`
+		// ESI includes other fields like constellation_id, security_status, etc.
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&sys); err != nil {
+		return "", err
+	}
+	return sys.Name, nil
+}
+
 func doGetRequest(url string) (*http.Response, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	// If you need custom headers, add them here
-	// req.Header.Set("User-Agent", "MyEveApp/1.0")
-
 	return client.Do(req)
 }

@@ -18,6 +18,8 @@ type AppConfig struct {
 	CharacterIdForUpdates        string `json:"characterIdForUpdates"`
 	SystemKillStatusResetMinutes int    `json:"systemKillStatusResetMinutes"`
 	DiscordStatusReportMins      int    `json:"discordStatusReportMins"`
+	LogLevel                     string `json:"logLevel"`
+	InsightTrackedIds            []int  `json:"insightTrackedIds"`
 
 	DiscordKillNotifications struct {
 		KillColor string `json:"killColor"`

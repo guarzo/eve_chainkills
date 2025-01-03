@@ -4,20 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sirupsen/logrus"
+	"golang.org/x/exp/slices"
 )
 
 // ChainKillChecker is the Go equivalent of the ChainKillChecker class in JS.
 type ChainKillChecker struct {
-	logger                *log.Logger
+	logger                *logrus.Logger
 	config                *AppConfig
-	mapIds                []int
 	ignoreSystemIds       []int
 	apiBaseUrl            string
 	apiSlug               string
@@ -35,22 +35,8 @@ type ChainKillChecker struct {
 	mu           sync.Mutex
 }
 
-// SystemInfo is a small struct for storing system data from your new API
-type SystemInfo struct {
-	SystemId int
-	Alias    string
-}
-
-// MapCharacter is a small struct for storing character data from your new API
-type MapCharacter struct {
-	CharacterId   string
-	CorporationId int
-	AllianceId    int
-}
-
 // NewChainKillChecker constructor
-func NewChainKillChecker(logger *log.Logger, config *AppConfig) (*ChainKillChecker, error) {
-	// parse mapIds from config
+func NewChainKillChecker(logger *logrus.Logger, config *AppConfig) (*ChainKillChecker, error) {
 	var ignoreSys []int
 	if len(config.IgnoreSystemIds) > 0 {
 		ignoreSys = config.IgnoreSystemIds
@@ -63,6 +49,7 @@ func NewChainKillChecker(logger *log.Logger, config *AppConfig) (*ChainKillCheck
 		apiBaseUrl:            config.APIBaseUrl,
 		apiSlug:               config.APISlug,
 		apiToken:              config.APIToken,
+		insightTrackedIds:     config.InsightTrackedIds,
 		minToSendDiscord:      config.DiscordStatusReportMins,
 		systems:               []SystemInfo{},
 		mapCharacters:         []MapCharacter{},
@@ -90,7 +77,6 @@ func (ck *ChainKillChecker) StartListening() {
 
 // connectAndListenZKill attempts a (re)connection to the zKillboard feed
 func (ck *ChainKillChecker) connectAndListenZKill() {
-	// We'll attempt reconnection in a loop
 	reconnectDelay := 10 * time.Second
 	wsURL := "wss://zkillboard.com/websocket/"
 	for {
@@ -146,42 +132,17 @@ func (ck *ChainKillChecker) readLoop(ctx context.Context, conn *websocket.Conn) 
 			return err
 		}
 		go func(msg []byte) {
-			if e := ck.handleZKillMessage(string(msg)); e != nil {
+			if e := ck.handleZKillMessage(msg); e != nil {
 				ck.logger.Printf("Error handling zKill message: %v", e)
 			}
 		}(message)
 	}
 }
 
-// Close closes the checker’s websocket if it’s open
-func (ck *ChainKillChecker) Close() {
-	ck.logger.Println("ChainKillChecker closing.")
-	ck.mu.Lock()
-	defer ck.mu.Unlock()
-	if ck.wsConn != nil {
-		ck.wsConn.Close()
-	}
-	if ck.wsCancelFunc != nil {
-		ck.wsCancelFunc()
-	}
-}
-
-// handleZKillMessage is analogous to the JS version
-func (ck *ChainKillChecker) handleZKillMessage(jsonData string) error {
-	var messageData struct {
-		KillmailId    int `json:"killmail_id"`
-		SolarSystemId int `json:"solar_system_id"`
-		Victim        struct {
-			AllianceId    int `json:"alliance_id"`
-			CorporationId int `json:"corporation_id"`
-		} `json:"victim"`
-		Attackers []struct {
-			AllianceId    int `json:"alliance_id"`
-			CorporationId int `json:"corporation_id"`
-			CharacterId   int `json:"character_id"`
-		} `json:"attackers"`
-	}
-	if err := json.Unmarshal([]byte(jsonData), &messageData); err != nil {
+// handleZKillMessage is analogous to the JS version but uses our ZkillMail struct.
+func (ck *ChainKillChecker) handleZKillMessage(raw []byte) error {
+	var zm ZkillMail
+	if err := json.Unmarshal(raw, &zm); err != nil {
 		return fmt.Errorf("unmarshal zKill message: %w", err)
 	}
 
@@ -195,7 +156,7 @@ func (ck *ChainKillChecker) handleZKillMessage(jsonData string) error {
 	// Possibly refresh systems from API
 	minSinceLastSystems := time.Since(ck.lastUpdateTime).Minutes()
 	ck.logger.Printf("[ZKill] killId=%d, solarSystem=%d, lastSysUpdate=%.1f mins, lastStatus=%.1f mins",
-		messageData.KillmailId, messageData.SolarSystemId, minSinceLastSystems, minSinceLastStatus)
+		zm.KillmailID, zm.SolarSystemID, minSinceLastSystems, minSinceLastStatus)
 	if int(minSinceLastSystems) > ck.minToGetLatestSystems {
 		if err := ck.updateSystems(); err != nil {
 			ck.logger.Printf("Error updating systems: %v", err)
@@ -206,14 +167,14 @@ func (ck *ChainKillChecker) handleZKillMessage(jsonData string) error {
 	matchedCorpKill := false
 	isKill := false
 
-	allianceId := messageData.Victim.AllianceId
-	victimCorpId := messageData.Victim.CorporationId
+	allianceId := zm.Victim.AllianceID
+	victimCorpId := zm.Victim.CorporationID
 
 	// is the victim in insightTrackedIds?
 	for _, tid := range ck.insightTrackedIds {
 		if tid == victimCorpId || tid == allianceId {
 			ck.logger.Printf("KillId %d => victim match. corpId=%d, allianceId=%d",
-				messageData.KillmailId, victimCorpId, allianceId)
+				zm.KillmailID, victimCorpId, allianceId)
 			matchedCorpKill = true
 			isKill = false
 			break
@@ -224,28 +185,41 @@ func (ck *ChainKillChecker) handleZKillMessage(jsonData string) error {
 		// check attackers
 		var matchedAttackersCorp int
 		var matchedAttackersAlli int
-		for _, att := range messageData.Attackers {
+		var matchedAttackerCharacter int
+		for _, att := range zm.Attackers {
 			for _, tid := range ck.insightTrackedIds {
-				if att.CorporationId == tid {
+				if att.CorporationID == tid {
 					matchedCorpKill = true
 					isKill = true
-					matchedAttackersCorp = att.CorporationId
+					matchedAttackersCorp = att.CorporationID
 					break
 				}
-				if att.AllianceId == tid {
+				if att.AllianceID == tid {
 					matchedCorpKill = true
 					isKill = true
-					matchedAttackersAlli = att.AllianceId
+					matchedAttackersAlli = att.AllianceID
+					break
+				}
+			}
+			// Also check if the attacker’s character ID is in mapCharacters
+			for _, mc := range ck.mapCharacters {
+				if mc.CharacterId == strconv.Itoa(att.CharacterID) {
+					matchedCorpKill = true
+					isKill = true
+					matchedAttackerCharacter = att.CharacterID
 					break
 				}
 			}
 			if matchedCorpKill {
 				if matchedAttackersCorp > 0 {
 					ck.logger.Printf("KillId %d => attacker corp match. corpId=%d",
-						messageData.KillmailId, matchedAttackersCorp)
+						zm.KillmailID, matchedAttackersCorp)
+				} else if matchedAttackerCharacter > 0 {
+					ck.logger.Printf("KillId %d => attacker char match. characterId=%d",
+						zm.KillmailID, matchedAttackerCharacter)
 				} else {
 					ck.logger.Printf("KillId %d => attacker alliance match. allianceId=%d",
-						messageData.KillmailId, matchedAttackersAlli)
+						zm.KillmailID, matchedAttackersAlli)
 				}
 				break
 			}
@@ -253,25 +227,27 @@ func (ck *ChainKillChecker) handleZKillMessage(jsonData string) error {
 	}
 
 	if matchedCorpKill {
-		ck.sendCorpKillMessage(messageData, isKill)
+		// We’ll pass the original raw message, which includes zkb hash, to "sendCorpKillMessage"
+		ck.sendCorpKillMessage(raw, isKill)
 		return nil
 	}
 
 	// else check if it happened in a system we track
 	var matchedSystem *SystemInfo
 	for i := range ck.systems {
-		if ck.systems[i].SystemId == messageData.SolarSystemId {
+		if ck.systems[i].SystemId == int(zm.SolarSystemID) {
 			matchedSystem = &ck.systems[i]
 			break
 		}
 	}
-	if matchedSystem != nil && !contains(ck.ignoreSystemIds, matchedSystem.SystemId) {
+
+	if matchedSystem != nil && !slices.Contains(ck.ignoreSystemIds, matchedSystem.SystemId) {
 		ck.logger.Printf("SystemId (%d) matched; checking map characters...", matchedSystem.SystemId)
 		// see if any of the attackers are in mapCharacters
 		foundMappedAttacker := false
-		for _, att := range messageData.Attackers {
+		for _, att := range zm.Attackers {
 			for _, mc := range ck.mapCharacters {
-				if mc.CharacterId == strconv.FormatInt(int64(att.CharacterId), 10) {
+				if mc.CharacterId == strconv.Itoa(att.CharacterID) {
 					foundMappedAttacker = true
 					break
 				}
@@ -282,12 +258,9 @@ func (ck *ChainKillChecker) handleZKillMessage(jsonData string) error {
 		}
 
 		if !foundMappedAttacker {
-			ck.logger.Printf("Zero mapped attackers out of %d. Sending chain message.", len(messageData.Attackers))
+			ck.logger.Printf("Zero mapped attackers out of %d. Sending chain message.", len(zm.Attackers))
 			post := fmt.Sprintf("@here A ship just died in %s to %d people, zkill link: https://zkillboard.com/kill/%d/",
-				matchedSystem.Alias, len(messageData.Attackers), messageData.KillmailId)
-
-			// update system status (stub)
-			ck.updateSystemStatus(messageData.SolarSystemId, 4, matchedSystem.Alias)
+				matchedSystem.Alias, len(zm.Attackers), zm.KillmailID)
 
 			// send chain message
 			ck.sendChainMessage(post)
@@ -296,6 +269,19 @@ func (ck *ChainKillChecker) handleZKillMessage(jsonData string) error {
 		}
 	}
 	return nil
+}
+
+// readLoop / connectAndListenZKill call this on shutdown
+func (ck *ChainKillChecker) Close() {
+	ck.logger.Println("ChainKillChecker closing.")
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	if ck.wsConn != nil {
+		ck.wsConn.Close()
+	}
+	if ck.wsCancelFunc != nil {
+		ck.wsCancelFunc()
+	}
 }
 
 // updateSystems fetches systems from the new API
@@ -324,7 +310,7 @@ func (ck *ChainKillChecker) updateSystems() error {
 
 	var body struct {
 		Data []struct {
-			Id            string `json:"id"` // not used
+			ID            string `json:"id"`
 			Name          string `json:"name"`
 			SolarSystemId int    `json:"solar_system_id"`
 		} `json:"data"`
@@ -335,21 +321,19 @@ func (ck *ChainKillChecker) updateSystems() error {
 
 	var newSystems []SystemInfo
 	for _, item := range body.Data {
-		nameLen := len(item.Name)
-		if nameLen > 0 {
-			ck.logger.Printf("processing system: %v \n", item)
-
-			lastChar := item.Name[nameLen-1]
-			if (lastChar >= 'A' && lastChar <= 'Z') || (lastChar >= 'a' && lastChar <= 'z') {
-				// Ends with a letter => skip
-				continue
-			}
-
-			newSystems = append(newSystems, SystemInfo{
-				SystemId: item.SolarSystemId,
-				Alias:    item.Name,
-			})
+		if len(item.Name) == 0 {
+			continue
 		}
+		// Example skip if name ends with letter
+		lastChar := item.Name[len(item.Name)-1]
+		if (lastChar >= 'A' && lastChar <= 'Z') || (lastChar >= 'a' && lastChar <= 'z') {
+			// skip
+			continue
+		}
+		newSystems = append(newSystems, SystemInfo{
+			SystemId: item.SolarSystemId,
+			Alias:    item.Name,
+		})
 	}
 	ck.systems = newSystems
 	ck.logger.Printf("[updateSystems] Fetched %d systems.\n", len(ck.systems))
@@ -383,16 +367,15 @@ func (ck *ChainKillChecker) getMapCharacters() error {
 
 	var body struct {
 		Data []struct {
-			Id        string `json:"id"` // not used
+			ID        string `json:"id"`
 			Character struct {
-				Id            string `json:"id"`
-				EveId         string `json:"eve_id"`
-				CorporationId int    `json:"corporation_id"`
-				AllianceId    int    `json:"alliance_id"`
+				ID            string `json:"id"`
+				EveID         string `json:"eve_id"`
+				CorporationID int    `json:"corporation_id"`
+				AllianceID    int    `json:"alliance_id"`
 			} `json:"character"`
 		} `json:"data"`
 	}
-	ck.logger.Println(fmt.Sprintf("character data %v", body))
 	if err = json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return err
 	}
@@ -400,9 +383,9 @@ func (ck *ChainKillChecker) getMapCharacters() error {
 	var newChars []MapCharacter
 	for _, item := range body.Data {
 		mc := MapCharacter{
-			CharacterId:   item.Character.EveId,
-			CorporationId: item.Character.CorporationId,
-			AllianceId:    item.Character.AllianceId,
+			CharacterId:   item.Character.EveID,
+			CorporationId: item.Character.CorporationID,
+			AllianceId:    item.Character.AllianceID,
 		}
 		newChars = append(newChars, mc)
 	}
@@ -411,35 +394,37 @@ func (ck *ChainKillChecker) getMapCharacters() error {
 	return nil
 }
 
-// updateSystemStatus is a stub (no DB usage)
-func (ck *ChainKillChecker) updateSystemStatus(systemId, statusId int, systemName string) {
-	ck.logger.Printf("[updateSystemStatus] systemId=%d, statusId=%d, name=%s", systemId, statusId, systemName)
-	// If you need to call an external API to note the status, do it here.
-}
-
 // sendChainMessage uses Discord's webhook
 func (ck *ChainKillChecker) sendChainMessage(messageBody string) {
-	err := sendDiscordWebhook(ck.config.DiscordChainkillWebhookId, ck.config.DiscordChainkillWebhookToken, messageBody, nil)
+	err := sendDiscordWebhook(
+		ck.config.DiscordChainkillWebhookId,
+		ck.config.DiscordChainkillWebhookToken,
+		messageBody,
+		nil,
+	)
 	if err != nil {
 		ck.logger.Printf("Error sending chain message: %v", err)
 	}
 }
 
 // sendCorpKillMessage builds a kill embed & sends to the corp kill channel
-func (ck *ChainKillChecker) sendCorpKillMessage(msgData interface{}, isKill bool) {
-	ck.logger.Printf("Sending Corp kill message")
-	// In JS, you constructed a KillDetails object and used it to build a KillEmbed
-	// We'll do something simpler in Go:
-	kd := NewKillDetails(ck.logger, ck.config, msgData)
+func (ck *ChainKillChecker) sendCorpKillMessage(raw []byte, isKill bool) {
+	kd := NewKillDetails(ck.logger, ck.config, raw)
 	if err := kd.GetKillDetails(); err != nil {
 		ck.logger.Printf("GetKillDetails error: %v", err)
 	}
 	kd.IsKill = isKill
 
+	// Now kd.FKM holds everything from zKill + ESI
 	ke := NewKillEmbed(ck.logger, ck.config, kd)
-	embed := ke.CreateEmbed() // returns a simple struct with Title, Description, etc.
+	embed := ke.CreateEmbed()
 
-	err := sendDiscordWebhook(ck.config.DiscordCorpkillWebhookId, ck.config.DiscordCorpkillWebhookToken, "", &embed)
+	err := sendDiscordWebhook(
+		ck.config.DiscordCorpkillWebhookId,
+		ck.config.DiscordCorpkillWebhookToken,
+		"",
+		&embed,
+	)
 	if err != nil {
 		ck.logger.Printf("Error sending corp kill embed: %v", err)
 	}
@@ -448,48 +433,13 @@ func (ck *ChainKillChecker) sendCorpKillMessage(msgData interface{}, isKill bool
 // sendInfoMessage uses the "info" webhook
 func (ck *ChainKillChecker) sendInfoMessage(messageBody string) {
 	ck.logger.Printf("Sending info message: %s", messageBody)
-	err := sendDiscordWebhook(ck.config.DiscordInfoWebhookId, ck.config.DiscordInfoWebhookToken, messageBody, nil)
+	err := sendDiscordWebhook(
+		ck.config.DiscordInfoWebhookId,
+		ck.config.DiscordInfoWebhookToken,
+		messageBody,
+		nil,
+	)
 	if err != nil {
 		ck.logger.Printf("Error sending info message: %v", err)
 	}
-}
-
-// --- Helper funcs
-
-func contains(arr []int, v int) bool {
-	for _, a := range arr {
-		if a == v {
-			return true
-		}
-	}
-	return false
-}
-
-func parseCommaSeparatedInts(csv string) []int {
-	var result []int
-	if csv == "" {
-		return result
-	}
-	var tmp int
-	for _, val := range splitComma(csv) {
-		if _, err := fmt.Sscanf(val, "%d", &tmp); err == nil {
-			if tmp > 0 {
-				result = append(result, tmp)
-			}
-		}
-	}
-	return result
-}
-
-func splitComma(str string) []string {
-	var out []string
-	start := 0
-	for i := 0; i < len(str); i++ {
-		if str[i] == ',' {
-			out = append(out, str[start:i])
-			start = i + 1
-		}
-	}
-	out = append(out, str[start:])
-	return out
 }

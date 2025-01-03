@@ -10,12 +10,12 @@ import (
 
 // discordWebhookBody is the shape for a basic message or embed
 type discordWebhookBody struct {
-	Content string  `json:"content,omitempty"`
-	Embeds  []Embed `json:"embeds,omitempty"`
+	Content string         `json:"content,omitempty"`
+	Embeds  []DiscordEmbed `json:"embeds,omitempty"`
 }
 
 // sendDiscordWebhook sends either a text message or an embed
-func sendDiscordWebhook(webhookID, webhookToken, textMessage string, embed *Embed) error {
+func sendDiscordWebhook(webhookID, webhookToken, textMessage string, embed *DiscordEmbed) error {
 	if webhookID == "" || webhookToken == "" {
 		return fmt.Errorf("discord webhook not configured properly (ID/Token missing)")
 	}
@@ -27,7 +27,7 @@ func sendDiscordWebhook(webhookID, webhookToken, textMessage string, embed *Embe
 		bodyStruct.Content = textMessage
 	}
 	if embed != nil {
-		bodyStruct.Embeds = []Embed{*embed}
+		bodyStruct.Embeds = []DiscordEmbed{*embed}
 	}
 
 	payload, err := json.Marshal(bodyStruct)

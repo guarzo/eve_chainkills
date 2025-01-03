@@ -4,8 +4,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 func main() {
@@ -16,7 +19,19 @@ func main() {
 	}
 
 	// 2) Create logger (simple version using stdlib)
-	logger := log.Default()
+	logger := logrus.New()
+
+	logger.SetFormatter(&logrus.TextFormatter{
+		ForceColors:   true,
+		FullTimestamp: false,
+	})
+
+	lvl, parseErr := logrus.ParseLevel(strings.ToLower(cfg.LogLevel))
+	if parseErr != nil {
+		logger.Warnf("Invalid log level '%s', defaulting to 'info'", cfg.LogLevel)
+		lvl = logrus.InfoLevel
+	}
+	logger.SetLevel(lvl)
 
 	// 3) Initialize and start the ChainKillChecker
 	ckChecker, err := NewChainKillChecker(logger, cfg)
@@ -36,5 +51,5 @@ func main() {
 	sig := <-sigs
 	logger.Printf("Received signal: %s, shutting down.", sig)
 	ckChecker.Close()
-	time.Sleep(1 * time.Second) // small sleep to ensure close message is logged
+	time.Sleep(1 * time.Second)
 }
