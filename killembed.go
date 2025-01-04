@@ -201,17 +201,22 @@ func parseHexColor(hexStr string) int {
 	return (r << 16) + (g << 8) + b
 }
 
-// formatISKValue - formats ISK with commas in the thousands place
-// e.g. 1234567.89 => 1,234,567.89 ISK
+// formatISKValue now handles M, B, T
 func formatISKValue(amount float64) string {
-	if amount < 1_000_000 {
+	switch {
+	case amount < 1_000_000:
 		return "<1 M ISK"
+	case amount < 1_000_000_000:
+		millions := amount / 1_000_000
+		millions = math.Round(millions*100) / 100
+		return fmt.Sprintf("%.2fm ISK", millions)
+	case amount < 1_000_000_000_000:
+		billions := amount / 1_000_000_000
+		billions = math.Round(billions*100) / 100
+		return fmt.Sprintf("%.2fb ISK", billions)
+	default:
+		trillions := amount / 1_000_000_000_000
+		trillions = math.Round(trillions*100) / 100
+		return fmt.Sprintf("%.2ft ISK", trillions)
 	}
-	// Convert to millions
-	millions := amount / 1_000_000
-
-	// Round to 2 decimals (e.g. 1.2345 => 1.23)
-	millions = math.Round(millions*100) / 100
-
-	return fmt.Sprintf("%.1fm ISK", millions)
 }
